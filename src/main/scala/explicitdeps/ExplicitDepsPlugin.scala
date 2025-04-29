@@ -18,7 +18,9 @@ object ExplicitDepsPlugin extends AutoPlugin {
     val undeclaredCompileDependenciesFilter = settingKey[ModuleFilter]("Filter to specify the undeclared dependencies that you care about")
 
     val unusedCompileDependencies = taskKey[Set[Dependency]]("find all libraries declared in libraryDependencies that this project's code does not actually depend on for compilation")
+    val unusedCompileDependenciesAggregate = taskKey[Set[Dependency]]("find all libraries declared in libraryDependencies that this project's code does not actually depend on for compilation, aggregated for all subprojects")
     val unusedCompileDependenciesTest = taskKey[Unit]("fail the build if there are any libraries declared in libraryDependencies that this project's code does not actually depend on for compilation")
+    val unusedCompileDependenciesAggregateTest = taskKey[Unit]("fail the build if there are any libraries declared in libraryDependencies that this project's code does not actually depend on for compilation, aggregated for all subprojects")
     val unusedCompileDependenciesFilter = settingKey[ModuleFilter]("Filter to specify the undeclared dependencies that you care about")
   }
   import autoImport._
@@ -31,8 +33,13 @@ object ExplicitDepsPlugin extends AutoPlugin {
     undeclaredCompileDependenciesFilter := defaultModuleFilter,
 
     unusedCompileDependencies := unusedCompileDependenciesTask.value,
+    unusedCompileDependenciesAggregate := unusedCompileDependenciesAggregateTask.value,
     unusedCompileDependenciesTest := unusedCompileDependenciesTestTask.value,
-    unusedCompileDependenciesFilter := defaultModuleFilter
+    unusedCompileDependenciesAggregateTest := unusedCompileDependenciesAggregateTestTask.value,
+    unusedCompileDependenciesFilter := defaultModuleFilter,
+
+    unusedCompileDependenciesAggregate / aggregate := false,
+    unusedCompileDependenciesAggregateTest / aggregate := false
   )
 
   // Evaluate "csrCacheDirectory" setting which is present only in sbt 1.3.0 or newer
@@ -45,6 +52,43 @@ object ExplicitDepsPlugin extends AutoPlugin {
         Some(csrCacheDirectoryValue)
       case _ => None
     }
+  }
+
+  private lazy val collectLibraryDepsProjectTask = Def.task {
+    val log = streams.value.log
+
+    val analysis = (Compile / compile).value.asInstanceOf[Analysis]
+
+    val csrCacheDirectoryOpt = csrCacheDirectory.?.value.map(_.getAbsolutePath)
+    val baseDir = baseDirectory.value.getAbsolutePath
+
+    val usedDeps: Set[File] = getAllLibraryDeps(analysis, log)(csrCacheDirectoryOpt, baseDir)
+    val declaredDeps: Seq[ModuleID] = libraryDependencies.value
+
+    log.debug(s"[${name.value}] Found ${usedDeps.size} used jars and ${declaredDeps.size} declared modules.")
+
+    (usedDeps, declaredDeps)
+  }
+
+  private lazy val collectLibraryDepsAllTask = Def.task {
+    val log = streams.value.log
+
+    val projectResults: Seq[(Set[File], Seq[ModuleID])] = collectLibraryDepsProjectTask.all(
+      ScopeFilter(inAnyProject, inConfigurations(Compile))
+    ).value
+
+    val (allUsedDeps, allDeclaredDeps) = projectResults.unzip
+
+    val mergedUsedDeps = allUsedDeps.flatten.toSet
+    val mergedDeclaredDeps = allDeclaredDeps.flatten.toSet
+
+    log.debug(s"Aggregated ${mergedUsedDeps.size} unique used jars and ${mergedDeclaredDeps.size} unique declared modules across all projects.")
+    log.debug("Aggregated Used Dependencies:")
+    mergedUsedDeps.foreach(dep => log.debug(s"  - ${dep.getName}"))
+
+    log.debug("Aggregated Declared Dependencies:")
+    mergedDeclaredDeps.foreach(dep => log.debug(s"  - ${dep.organization} % ${dep.name} % ${dep.revision}"))
+    (mergedUsedDeps, mergedDeclaredDeps.toSeq)
   }
 
   lazy val undeclaredCompileDependenciesTask = Def.task {
@@ -101,4 +145,27 @@ object ExplicitDepsPlugin extends AutoPlugin {
       throw UnusedCompileDependenciesException
   }
 
+  lazy val unusedCompileDependenciesAggregateTask = Def.task {
+    val log = streams.value.log
+    val projectName = name.value
+    val (usedDeps, declaredDeps) = collectLibraryDepsAllTask.value
+    val scalaBinaryVer = scalaBinaryVersion.value
+    val scalaFullVer = scalaVersion.value
+    val filter = unusedCompileDependenciesFilter.value
+
+    Logic.getUnusedCompileDependencies(
+      projectName,
+      usedDeps,
+      declaredDeps,
+      ScalaVersion(scalaBinaryVer, scalaFullVer),
+      filter,
+      log
+    )
+  }
+
+  lazy val unusedCompileDependenciesAggregateTestTask = Def.task {
+    val unusedCompileDeps = unusedCompileDependenciesAggregate.value
+    if (unusedCompileDeps.nonEmpty)
+      throw UnusedCompileDependenciesException
+  }
 }
