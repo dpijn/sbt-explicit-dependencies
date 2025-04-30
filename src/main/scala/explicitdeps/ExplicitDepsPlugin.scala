@@ -84,10 +84,16 @@ object ExplicitDepsPlugin extends AutoPlugin {
 
     log.debug(s"Aggregated ${mergedUsedDeps.size} unique used jars and ${mergedDeclaredDeps.size} unique declared modules across all projects.")
     log.debug("Aggregated Used Dependencies:")
-    mergedUsedDeps.foreach(dep => log.debug(s"  - ${dep.getName}"))
+    mergedUsedDeps.toSeq.sorted.foreach(dep => log.debug(s"  - ${dep.getName}"))
 
     log.debug("Aggregated Declared Dependencies:")
-    mergedDeclaredDeps.foreach(dep => log.debug(s"  - ${dep.organization} % ${dep.name} % ${dep.revision}"))
+    val namePadding = mergedDeclaredDeps.map(_.name.length).max + 3
+    mergedDeclaredDeps
+      .toSeq.sorted(Ordering.by[ModuleID, String](_.name))
+      .foreach { dep =>
+        val paddedName = dep.name.padTo(namePadding, ' ')
+        log.debug(s"  - $paddedName${dep.organization} % ${dep.name} % ${dep.revision}")
+      }
     (mergedUsedDeps, mergedDeclaredDeps.toSeq)
   }
 
